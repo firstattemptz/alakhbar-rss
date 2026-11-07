@@ -34,7 +34,7 @@ FULL_TEXT_SYNDICATION = (
 
 # Your supplied article body XPath.
 ARTICLE_BODY_XPATH = (
-    "/html/body/main/div/div[3]/div/div/div[2]"
+    "/html/body/main/div/div[3]/div/div/div[1]/div"
 )
 
 HEADERS = {
