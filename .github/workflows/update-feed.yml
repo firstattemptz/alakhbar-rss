@@ -1,5 +1,9 @@
 name: Update Al-Akhbar RSS Feed
 
+
+  env:
+  FULL_TEXT_SYNDICATION: "true"
+
 on:
   workflow_dispatch:
   schedule:
@@ -9,6 +13,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+
 
 concurrency:
   group: rss-feed-deployment
