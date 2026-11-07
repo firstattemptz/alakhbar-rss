@@ -203,6 +203,14 @@ def extract_metadata(soup, article_url):
         or get_meta("date")
     )
 
+    metadata["thumbnailCaption"] = (
+    get_meta("thumbnailCaption")
+    or get_meta("og:thumbnailCaption")
+    or get_meta("twitter:description")
+    or get_meta("og:description")
+    or get_meta("description")
+    )
+
     if metadata["image"]:
         metadata["image"] = urljoin(
             article_url,
@@ -468,6 +476,7 @@ def extract_article(article_url):
             "author": metadata["author"],
             "description": metadata["description"],
             "image": metadata["image"],
+            "thumbnailCaption": metadata["thumbnailCaption"],
             "date": (
                 date_parser.parse(metadata["date"])
                 if metadata["date"]
@@ -553,8 +562,9 @@ def extract_articles():
         )
 
         description = clean_text(
-            article_data.get("description")
-            or ""
+        article_data.get("thumbnailCaption")
+        or article_data.get("description")
+        or ""
         )
 
         image = article_data.get("image") or ""
