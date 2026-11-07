@@ -504,7 +504,7 @@ def extract_article(article_url, card_text, description):
     ),
     "url": article_url,
     "content": body_html,
-}
+    }
 
     except requests.RequestException as exc:
         logging.warning(
