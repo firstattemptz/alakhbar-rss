@@ -40,10 +40,16 @@ jobs:
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
+      - name: Prepare website
+        run: |
+          mkdir -p public
+          cp feed.xml public/feed.xml
+          cp index.html public/index.html
+
       - name: Upload feed
         uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: public
 
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
