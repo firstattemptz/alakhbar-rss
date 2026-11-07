@@ -33,9 +33,7 @@ FULL_TEXT_SYNDICATION = (
 )
 
 # Your supplied article body XPath.
-ARTICLE_BODY_XPATH = (
-    "/html/body/main/div/div[3]/div/div/div[1]/div"
-)
+ARTICLE_BODY_SELECTOR = ".post-details-content > div:nth-child(1)"
 
 HEADERS = {
     "User-Agent": (
