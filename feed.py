@@ -28,7 +28,7 @@ TIMEOUT = 30
 # Enable only when you have permission to republish
 # complete articles.
 FULL_TEXT_SYNDICATION = (
-    os.environ.get("FULL_TEXT_SYNDICATION", "false").lower()
+    os.environ.get("FULL_TEXT_SYNDICATION", "true").lower()
     == "true"
 )
 
