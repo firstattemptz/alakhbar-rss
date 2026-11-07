@@ -178,94 +178,83 @@ def extract_date_from_soup(soup, card_text):
 
 def extract_article_body(html, article_url):
     """
-    Extract article HTML using the supplied XPath.
-
-    Preserves paragraphs, headings, lists and links.
-
-    The full article HTML is retained internally.
-    Publication of the complete text requires
-    FULL_TEXT_SYNDICATION=true.
+    Extract article content using the stable article container selector.
+    Preserve original article HTML and inline links.
     """
 
     try:
-        document = lxml_html.fromstring(html)
+        soup = BeautifulSoup(html, "html.parser")
 
-        nodes = document.xpath(
-            ARTICLE_BODY_XPATH
-        )
+        body = soup.select_one(ARTICLE_BODY_SELECTOR)
 
-        if not nodes:
-            logging.warning(
-                "Article body XPath returned no results: %s",
+        if not body:
+            logging.error(
+                "Article body selector not found: %s",
                 article_url
             )
             return ""
 
-        body = nodes[0]
+        # Work on a copy so the original soup remains untouched.
+        body = BeautifulSoup(
+            str(body),
+            "html.parser"
+        ).find("div")
 
-        # Remove scripts and non-article elements.
-        for element in body.xpath(
-            ".//script | .//style | .//noscript "
-            "| .//iframe"
+        if not body:
+            return ""
+
+        # Remove scripts and non-content elements.
+        for element in body.select(
+            "script, style, noscript, iframe"
         ):
-            element.drop_tree()
+            element.decompose()
 
-        # Make embedded links absolute.
-        for link in body.xpath(".//a[@href]"):
-            link.set(
-                "href",
-                absolute_url(
-                    link.get("href"),
-                    article_url
-                )
+        # Convert relative links to absolute URLs.
+        for link in body.select("a[href]"):
+            link["href"] = absolute_url(
+                link["href"],
+                article_url
             )
 
-        # Make embedded image URLs absolute.
-        for image in body.xpath(".//img"):
+        # Convert relative image URLs to absolute URLs.
+        for image in body.select("img"):
             for attribute in (
                 "src",
                 "data-src",
                 "data-original"
             ):
-                value = image.get(attribute)
-
-                if value:
-                    image.set(
-                        attribute,
-                        absolute_url(value, article_url)
+                if image.get(attribute):
+                    image[attribute] = absolute_url(
+                        image[attribute],
+                        article_url
                     )
 
-        # Remove empty paragraphs.
-        for paragraph in body.xpath(".//p"):
-            if not clean_text(
-                paragraph.text_content()
-            ):
-                paragraph.drop_tree()
+        content = body.decode_contents()
 
-        # Serialize the extracted article HTML.
-        content = "".join(
-            etree.tostring(
-                child,
-                encoding="unicode",
-                method="html"
-            )
-            for child in body
+        text_length = len(
+            body.get_text(" ", strip=True)
         )
 
         logging.info(
-            "Extracted article body: %d characters (%s)",
-            len(content),
+            "Extracted article: %d characters (%s)",
+            text_length,
             article_url
         )
+
+        if text_length < 200:
+            logging.warning(
+                "Article body unusually short: %s",
+                article_url
+            )
+            return ""
 
         return content
 
     except Exception:
         logging.exception(
-            "Article body extraction failed: %s",
+            "Article extraction failed: %s",
             article_url
         )
-
         return ""
 
 
