@@ -3,6 +3,7 @@
 import os
 import re
 import logging
+import json
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from urllib.parse import urljoin, urlparse
@@ -220,93 +221,154 @@ def inspect_downloaded_page(html, article_url):
 
     logging.info("========== END NEXT.JS DIAGNOSTICS ==========")
 
-ARTICLE_BODY_SELECTOR = ".post-details-content > div:nth-child(1)"
-
-
 def extract_article_body(html, article_url):
+    """
+    Extract article HTML from Next.js React Server Component data.
+    """
+
     soup = BeautifulSoup(html, "html.parser")
 
-    selectors = [
-        ".post-details-content > div:nth-child(1)",
-        ".post-details-content",
-        "article",
-    ]
+    # Collect Next.js server-component payloads.
+    payloads = []
 
-    logging.info("Inspecting article: %s", article_url)
+    pattern = re.compile(
+        r'self\.__next_f\.push\(\[1,("(?:\\.|[^"\\])*")\]\)',
+        re.DOTALL
+    )
 
-    for selector in selectors:
-        body = soup.select_one(selector)
+    for script in soup.find_all("script"):
+        raw = script.string or script.get_text()
 
-        if not body:
-            logging.info("Selector NOT FOUND: %s", selector)
+        if not raw:
             continue
 
-        text = body.get_text(" ", strip=True)
+        for match in pattern.finditer(raw):
+            try:
+                payloads.append(
+                    json.loads(match.group(1))
+                )
+            except (ValueError, TypeError):
+                logging.warning(
+                    "Could not decode Next.js payload"
+                )
 
-        logging.info(
-            "Selector: %s | Text length: %d | HTML length: %d",
-            selector,
-            len(text),
-            len(str(body))
-        )
-
-        logging.info(
-            "Text preview: %s",
-            text[:500]
-        )
-
-        if len(text) < 200:
-            continue
-
-        # Preserve original HTML.
-        body = BeautifulSoup(
-            str(body),
-            "html.parser"
-        ).find()
-
-        if not body:
-            continue
-
-        for element in body.select(
-            "script, style, noscript, iframe"
-        ):
-            element.decompose()
-
-        for link in body.select("a[href]"):
-            link["href"] = absolute_url(
-                link["href"],
-                article_url
-            )
-
-        for image in body.select("img"):
-            for attr in ("src", "data-src", "data-original"):
-                if image.get(attr):
-                    image[attr] = absolute_url(
-                        image[attr],
-                        article_url
-                    )
-
-        content = body.decode_contents()
-
-        logging.info(
-            "SUCCESS: Extracted %d characters from %s",
-            len(text),
+    if not payloads:
+        logging.error(
+            "No Next.js payload found: %s",
             article_url
         )
+        return ""
 
-        return content
+    stream = "\n".join(payloads)
 
-    logging.error(
-        "NO ARTICLE BODY FOUND in downloaded HTML: %s",
-        article_url
+    # Locate React Server Component text chunks.
+    records = list(
+        re.finditer(
+            r"(?m)^([0-9a-f]+):",
+            stream
+        )
+    )
+
+    candidates = []
+
+    for index, record in enumerate(records):
+        header = re.match(
+            r"T[0-9a-f]+,",
+            stream[record.end():]
+        )
+
+        if not header:
+            continue
+
+        start = record.end() + header.end()
+
+        end = (
+            records[index + 1].start()
+            if index + 1 < len(records)
+            else len(stream)
+        )
+
+        chunk = stream[start:end].strip()
+
+        if "<p" not in chunk.lower():
+            continue
+
+        candidate = BeautifulSoup(
+            chunk,
+            "html.parser"
+        )
+
+        text = candidate.get_text(
+            " ",
+            strip=True
+        )
+
+        # Reject metadata and unrelated short fragments.
+        if len(text) < 300:
+            continue
+
+        if len(candidate.find_all("p")) < 2:
+            continue
+
+        candidates.append(
+            (len(text), candidate)
+        )
+
+    if not candidates:
+        logging.error(
+            "No article text chunks found: %s",
+            article_url
+        )
+        return ""
+
+    # The article body is the largest substantial text chunk.
+    candidates.sort(
+        key=lambda item: item[0],
+        reverse=True
+    )
+
+    text_length, body = candidates[0]
+
+    # Remove non-editorial elements.
+    for element in body.select(
+        "script, style, noscript, iframe"
+    ):
+        element.decompose()
+
+    # Preserve links, converting relative URLs to absolute URLs.
+    for link in body.select("a[href]"):
+        link["href"] = urljoin(
+            article_url,
+            link["href"]
+        )
+
+    # Preserve images and their absolute URLs.
+    for image in body.select("img"):
+        for attribute in (
+            "src",
+            "data-src",
+            "data-original"
+        ):
+            if image.get(attribute):
+                image[attribute] = urljoin(
+                    article_url,
+                    image[attribute]
+                )
+
+    content = body.decode_contents()
+
+    logging.info(
+        "SUCCESS: Extracted %d characters of article text",
+        text_length
     )
 
     logging.info(
-        "Downloaded page title: %s",
-        soup.title.get_text(strip=True) if soup.title else "None"
+        "Article HTML length: %d",
+        len(content)
     )
 
-    return ""
+    return content
+
 # --------------------------------------------------
 # Article attribution
 # --------------------------------------------------
@@ -356,8 +418,7 @@ def extract_article(article_url, card_text, description):
 
     try:
         html = fetch(article_url)
-        inspect_downloaded_page(html, article_url)
-
+        
         soup = BeautifulSoup(
             html,
             "html.parser"
