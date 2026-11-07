@@ -101,7 +101,7 @@ def article_date(article_url, card_text):
             card_text
         )
         if match:
-            return date_parser.parse(match.group()).replace(
+            return date_parser.parse(match.group(), dayfirst=True).replace(
                 tzinfo=timezone.utc
             )
     except (ValueError, TypeError, OverflowError):
