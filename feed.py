@@ -444,94 +444,56 @@ def add_attribution(content, article_url):
 # Article extraction
 # --------------------------------------------------
 
-def extract_article(article_url, card_text, description):
-    """
-    Fetch article once and extract its metadata and body.
-    """
+def extract_article(article_url):
 
-    result = {
-        "date": None,
-        "content": "",
-        "description": description,
-    }
+    logging.info("Processing article: %s", article_url)
 
     try:
         html = fetch(article_url)
-        
-        soup = BeautifulSoup(
-            html,
-            "html.parser"
-        )
 
-        # Extract publication date.
-        result["date"] = extract_date_from_soup(
-            soup,
-            card_text
-        )
+        soup = BeautifulSoup(html, "html.parser")
+
+        # 1. Extract metadata
         metadata = extract_metadata(soup, article_url)
-        
-        # Extract article body.
+
+        # 2. Extract full article text
         body_html = extract_article_body(
             html,
             article_url
         )
 
-        if body_html:
-            result["content"] = body_html
+        # 3. Build article dictionary
+        article = {
+            "title": metadata["title"],
+            "author": metadata["author"],
+            "description": metadata["description"],
+            "image": metadata["image"],
+            "date": (
+                date_parser.parse(metadata["date"])
+                if metadata["date"]
+                else datetime.now(timezone.utc)
+            ),
+            "url": article_url,
+            "content": body_html,
+        }
 
-            # Use a short text excerpt as RSS description.
-            body_document = lxml_html.fragment_fromstring(
-                body_html,
-                create_parent="div"
-            )
+        return article
 
-            body_text = clean_text(
-                body_document.text_content()
-            )
-
-            if not result["description"]:
-                result["description"] = body_text[:500]
-
-    article = {
-    "title": metadata["title"],
-    "author": metadata["author"],
-    "description": metadata["description"],
-    "image": metadata["image"],
-    "date": (
-        date_parser.parse(metadata["date"])
-        if metadata["date"]
-        else datetime.now(timezone.utc)
-    ),
-    "url": article_url,
-    "content": body_html,
-    }
-
-    except requests.RequestException as exc:
-        logging.warning(
-            "Could not fetch article %s: %s",
-            article_url,
-            exc
+    except Exception:
+        logging.exception(
+            "Failed to extract article: %s",
+            article_url
         )
+        return None
 
-    if not result["date"]:
-        result["date"] = (
-            datetime.now(timezone.utc)
-        )
-
-    return result
 
 
 def extract_articles():
-    logging.info(
-        "Fetching Al-Akhbar news listing"
-    )
+    logging.info("Fetching Al-Akhbar news listing")
 
     html = fetch(NEWS_URL)
 
-    soup = BeautifulSoup(
-        html,
-        "html.parser"
-    )
+    soup = BeautifulSoup(html, "html.parser")
 
     articles = {}
     seen_urls = set()
@@ -558,89 +520,76 @@ def extract_articles():
         if url in seen_urls:
             continue
 
-        title = clean_text(
+        # Listing title is used only as a preliminary validation.
+        listing_title = clean_text(
             link.get_text(" ", strip=True)
         )
 
-        if len(title) < 12:
+        if len(listing_title) < 12:
             continue
 
         seen_urls.add(url)
 
-        # Find surrounding listing card.
-        container = link
-
-        for _ in range(5):
-            if container.parent:
-                container = container.parent
-
-        card_text = clean_text(
-            container.get_text(" ", strip=True)
-        )
-
-        # Extract listing description.
-        description = ""
-
-        for paragraph in container.find_all("p"):
-
-            candidate = clean_text(
-                paragraph.get_text(" ", strip=True)
-            )
-
-            if (
-                len(candidate) > 35
-                and candidate != title
-            ):
-                description = candidate
-                break
-
-        # Extract listing image.
-        image_url = ""
-
-        image = container.find("img")
-
-        if image:
-            image_url = (
-                image.get("src")
-                or image.get("data-src")
-                or image.get("data-original")
-                or ""
-            )
-
-            if image_url:
-                image_url = absolute_url(
-                    image_url,
-                    url
-                )
-
         logging.info(
             "Processing article: %s",
-            title
+            url
         )
 
-        # Fetch article once.
-        article_data = extract_article(
-            url,
-            card_text,
-            description
+        # Extract all metadata and content from the article page.
+        article_data = extract_article(url)
+
+        # Skip failed extractions.
+        if not article_data:
+            logging.warning(
+                "Skipping article because extraction failed: %s",
+                url
+            )
+            continue
+
+        # Use metadata extracted from the article itself.
+        title = clean_text(
+            article_data.get("title")
+            or listing_title
         )
+
+        description = clean_text(
+            article_data.get("description")
+            or ""
+        )
+
+        image = article_data.get("image") or ""
+
+        content = article_data.get("content") or ""
+
+        date = article_data.get("date")
+
+        if not date:
+            date = datetime.now(timezone.utc)
+
+        # Ensure timezone-aware dates.
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=timezone.utc)
 
         articles[url] = {
             "title": title,
             "url": url,
-            "description": (
-                article_data["description"][:1000]
-            ),
-            "content": article_data["content"],
-            "image": image_url,
-            "date": article_data["date"],
+            "description": description[:1000],
+            "content": content,
+            "image": image,
+            "date": date,
+            "author": article_data.get("author", "Al-Akhbar"),
         }
+
+        logging.info(
+            "Successfully extracted: %s",
+            title
+        )
 
         if len(articles) >= MAX_ITEMS:
             break
 
     logging.info(
-        "Found %d candidate articles",
+        "Found %d successfully extracted articles",
         len(articles)
     )
 
