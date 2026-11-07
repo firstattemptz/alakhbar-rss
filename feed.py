@@ -176,6 +176,45 @@ def extract_date_from_soup(soup, card_text):
 # Article body extraction
 # --------------------------------------------------
 
+def inspect_downloaded_page(html, article_url):
+    soup = BeautifulSoup(html, "html.parser")
+
+    logging.info("========== PAGE DIAGNOSTICS ==========")
+    logging.info("URL: %s", article_url)
+    logging.info("TITLE: %s", soup.title.get_text(strip=True) if soup.title else "Missing")
+    logging.info("HTML SIZE: %d", len(html))
+
+    checks = [
+        "post-details-content",
+        "articleBody",
+        "__NEXT_DATA__",
+        "__NUXT__",
+        "application/ld+json",
+        "rubio",
+    ]
+
+    for term in checks:
+        logging.info(
+            "HTML contains '%s': %s",
+            term,
+            term.lower() in html.lower()
+        )
+
+    # Show possible embedded article data.
+    for script in soup.find_all("script", type="application/ld+json"):
+        logging.info(
+            "JSON-LD: %s",
+            script.get_text()[:2000]
+        )
+
+    # Show the beginning of the received HTML.
+    logging.info(
+        "HTML PREVIEW: %s",
+        html[:2500]
+    )
+
+    logging.info("========== END DIAGNOSTICS ==========")
+
 ARTICLE_BODY_SELECTOR = ".post-details-content > div:nth-child(1)"
 
 
@@ -312,6 +351,7 @@ def extract_article(article_url, card_text, description):
 
     try:
         html = fetch(article_url)
+        inspect_downloaded_page(html, article_url)
 
         soup = BeautifulSoup(
             html,
