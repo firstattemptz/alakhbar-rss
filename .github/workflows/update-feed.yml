@@ -1,9 +1,5 @@
 name: Update Al-Akhbar RSS Feed
 
-
-  env:
-  FULL_TEXT_SYNDICATION: "true"
-
 on:
   workflow_dispatch:
   schedule:
@@ -22,6 +18,10 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
+
+    env:
+      FULL_TEXT_SYNDICATION: "true"
+
 
     steps:
       - name: Checkout repository
