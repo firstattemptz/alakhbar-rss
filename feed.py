@@ -179,41 +179,46 @@ def extract_date_from_soup(soup, card_text):
 def inspect_downloaded_page(html, article_url):
     soup = BeautifulSoup(html, "html.parser")
 
-    logging.info("========== PAGE DIAGNOSTICS ==========")
-    logging.info("URL: %s", article_url)
-    logging.info("TITLE: %s", soup.title.get_text(strip=True) if soup.title else "Missing")
-    logging.info("HTML SIZE: %d", len(html))
+    logging.info("========== NEXT.JS DIAGNOSTICS ==========")
 
-    checks = [
+    # Identify Next.js scripts.
+    for script in soup.find_all("script", src=True):
+        src = absolute_url(script["src"], article_url)
+
+        logging.info("SCRIPT: %s", src)
+
+    # Check for React Server Component payloads.
+    markers = [
+        "self.__next_f.push",
+        "self.__next_f",
+        "self.__next",
         "post-details-content",
         "articleBody",
-        "__NEXT_DATA__",
-        "__NUXT__",
-        "application/ld+json",
-        "rubio",
+        "909571",
+        "rubio-s-possible-exit",
     ]
 
-    for term in checks:
+    for marker in markers:
         logging.info(
-            "HTML contains '%s': %s",
-            term,
-            term.lower() in html.lower()
+            "MARKER '%s': %s",
+            marker,
+            marker.lower() in html.lower()
         )
 
-    # Show possible embedded article data.
-    for script in soup.find_all("script", type="application/ld+json"):
-        logging.info(
-            "JSON-LD: %s",
-            script.get_text()[:2000]
-        )
+    # Check for embedded article-related data.
+    for script in soup.find_all("script"):
+        content = script.string or script.get_text()
 
-    # Show the beginning of the received HTML.
-    logging.info(
-        "HTML PREVIEW: %s",
-        html[:2500]
-    )
+        if content and (
+            "__next_f" in content
+            or "909571" in content
+        ):
+            logging.info(
+                "EMBEDDED DATA SCRIPT: %s",
+                content[:1500]
+            )
 
-    logging.info("========== END DIAGNOSTICS ==========")
+    logging.info("========== END NEXT.JS DIAGNOSTICS ==========")
 
 ARTICLE_BODY_SELECTOR = ".post-details-content > div:nth-child(1)"
 
