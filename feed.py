@@ -2,7 +2,6 @@
 
 import os
 import re
-import hashlib
 import logging
 from datetime import datetime, timezone
 from email.utils import format_datetime
@@ -12,6 +11,8 @@ from xml.etree import ElementTree as ET
 import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
+from lxml import html as lxml_html
+from lxml import etree
 
 # --------------------------------------------------
 # Configuration
@@ -23,6 +24,18 @@ OUTPUT_FILE = "feed.xml"
 
 MAX_ITEMS = 50
 TIMEOUT = 30
+
+# Enable only when you have permission to republish
+# complete articles.
+FULL_TEXT_SYNDICATION = (
+    os.environ.get("FULL_TEXT_SYNDICATION", "false").lower()
+    == "true"
+)
+
+# Your supplied article body XPath.
+ARTICLE_BODY_XPATH = (
+    "/html/body/main/div/div[3]/div/div/div[2]"
+)
 
 HEADERS = {
     "User-Agent": (
@@ -40,88 +53,342 @@ logging.basicConfig(
 session = requests.Session()
 session.headers.update(HEADERS)
 
+CONTENT_NS = (
+    "http://purl.org/rss/1.0/modules/content/"
+)
+
+MEDIA_NS = (
+    "http://search.yahoo.com/mrss/"
+)
+
+ATOM_NS = (
+    "http://www.w3.org/2005/Atom"
+)
+
+ET.register_namespace("content", CONTENT_NS)
+ET.register_namespace("media", MEDIA_NS)
+ET.register_namespace("atom", ATOM_NS)
+
 
 # --------------------------------------------------
 # Helpers
 # --------------------------------------------------
 
 def fetch(url):
-    response = session.get(url, timeout=TIMEOUT)
+    """Fetch a webpage."""
+
+    response = session.get(
+        url,
+        timeout=TIMEOUT
+    )
+
     response.raise_for_status()
+
     return response.text
 
 
 def clean_text(value):
+    """Normalize whitespace."""
+
     return re.sub(r"\s+", " ", value or "").strip()
 
 
-def absolute_url(url):
-    return urljoin(BASE_URL, url)
+def absolute_url(url, base=BASE_URL):
+    """Convert relative URLs into absolute URLs."""
+
+    if not url:
+        return ""
+
+    return urljoin(base, url.strip())
 
 
-def article_date(article_url, card_text):
-    """Try article metadata first, then listing text."""
+def normalize_date(value):
+    """Parse a date and ensure it is timezone-aware."""
+
+    try:
+        result = date_parser.parse(value)
+
+        if result.tzinfo is None:
+            result = result.replace(tzinfo=timezone.utc)
+
+        return result.astimezone(timezone.utc)
+
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+# --------------------------------------------------
+# Article metadata
+# --------------------------------------------------
+
+def extract_date_from_soup(soup, card_text):
+    """Extract publication date from article metadata."""
+
+    candidates = [
+        soup.find(
+            "meta",
+            property="article:published_time"
+        ),
+        soup.find(
+            "meta",
+            attrs={"name": "date"}
+        ),
+        soup.find(
+            "meta",
+            attrs={"name": "publish-date"}
+        ),
+    ]
+
+    for tag in candidates:
+        if tag and tag.get("content"):
+            result = normalize_date(tag["content"])
+
+            if result:
+                return result
+
+    for tag in soup.find_all("time"):
+        value = (
+            tag.get("datetime")
+            or tag.get_text(" ", strip=True)
+        )
+
+        result = normalize_date(value)
+
+        if result:
+            return result
+
+    # Fallback to listing card date.
+    match = re.search(
+        r"\b\d{1,2}[./-]\d{1,2}[./-]\d{4}\b",
+        card_text
+    )
+
+    if match:
+        result = normalize_date(
+            match.group()
+        )
+
+        if result:
+            return result
+
+    return None
+
+
+# --------------------------------------------------
+# Article body extraction
+# --------------------------------------------------
+
+def extract_article_body(html, article_url):
+    """
+    Extract article HTML using the supplied XPath.
+
+    Preserves paragraphs, headings, lists and links.
+
+    The full article HTML is retained internally.
+    Publication of the complete text requires
+    FULL_TEXT_SYNDICATION=true.
+    """
+
+    try:
+        document = lxml_html.fromstring(html)
+
+        nodes = document.xpath(
+            ARTICLE_BODY_XPATH
+        )
+
+        if not nodes:
+            logging.warning(
+                "Article body XPath returned no results: %s",
+                article_url
+            )
+            return ""
+
+        body = nodes[0]
+
+        # Remove scripts and non-article elements.
+        for element in body.xpath(
+            ".//script | .//style | .//noscript "
+            "| .//iframe"
+        ):
+            element.drop_tree()
+
+        # Make embedded links absolute.
+        for link in body.xpath(".//a[@href]"):
+            link.set(
+                "href",
+                absolute_url(
+                    link.get("href"),
+                    article_url
+                )
+            )
+
+        # Make embedded image URLs absolute.
+        for image in body.xpath(".//img"):
+            for attribute in (
+                "src",
+                "data-src",
+                "data-original"
+            ):
+                value = image.get(attribute)
+
+                if value:
+                    image.set(
+                        attribute,
+                        absolute_url(value, article_url)
+                    )
+
+        # Remove empty paragraphs.
+        for paragraph in body.xpath(".//p"):
+            if not clean_text(
+                paragraph.text_content()
+            ):
+                paragraph.drop_tree()
+
+        # Serialize the extracted article HTML.
+        content = "".join(
+            etree.tostring(
+                child,
+                encoding="unicode",
+                method="html"
+            )
+            for child in body
+        )
+
+        logging.info(
+            "Extracted article body: %d characters (%s)",
+            len(content),
+            article_url
+        )
+
+        return content
+
+    except Exception:
+        logging.exception(
+            "Article body extraction failed: %s",
+            article_url
+        )
+
+        return ""
+
+
+# --------------------------------------------------
+# Article attribution
+# --------------------------------------------------
+
+def add_attribution(content, article_url):
+    """
+    Append linked publisher attribution.
+    """
+
+    attribution = etree.Element("p")
+
+    attribution.text = "Originally published by "
+
+    link = etree.SubElement(
+        attribution,
+        "a",
+        href=article_url
+    )
+
+    link.text = "Al-Akhbar"
+
+    link.tail = "."
+
+    attribution_html = etree.tostring(
+        attribution,
+        encoding="unicode",
+        method="html"
+    )
+
+    return (content or "") + attribution_html
+
+
+# --------------------------------------------------
+# Article extraction
+# --------------------------------------------------
+
+def extract_article(article_url, card_text, description):
+    """
+    Fetch article once and extract its metadata and body.
+    """
+
+    result = {
+        "date": None,
+        "content": "",
+        "description": description,
+    }
 
     try:
         html = fetch(article_url)
-        soup = BeautifulSoup(html, "html.parser")
 
-        candidates = [
-            soup.find("meta", property="article:published_time"),
-            soup.find("meta", attrs={"name": "date"}),
-            soup.find("meta", attrs={"name": "publish-date"}),
-        ]
+        soup = BeautifulSoup(
+            html,
+            "html.parser"
+        )
 
-        for tag in candidates:
-            if tag and tag.get("content"):
-                try:
-                    return date_parser.parse(
-                        tag["content"]
-                    ).replace(tzinfo=timezone.utc)
-                except (ValueError, TypeError, OverflowError):
-                    pass
-
-        for tag in soup.find_all("time"):
-            value = tag.get("datetime") or tag.get_text(" ", strip=True)
-            if value:
-                try:
-                    return date_parser.parse(value).replace(
-                        tzinfo=timezone.utc
-                    )
-                except (ValueError, TypeError, OverflowError):
-                    pass
-
-    except requests.RequestException as exc:
-        logging.warning("Could not fetch article metadata: %s", exc)
-
-    # Fallback: look for a date in the listing card.
-    try:
-        match = re.search(
-            r"\b\d{1,2}[./-]\d{1,2}[./-]\d{4}\b",
+        # Extract publication date.
+        result["date"] = extract_date_from_soup(
+            soup,
             card_text
         )
-        if match:
-            return date_parser.parse(match.group(), dayfirst=True).replace(
-                tzinfo=timezone.utc
-            )
-    except (ValueError, TypeError, OverflowError):
-        pass
 
-    return datetime.now(timezone.utc)
+        # Extract article body.
+        body_html = extract_article_body(
+            html,
+            article_url
+        )
+
+        if body_html:
+            result["content"] = body_html
+
+            # Use a short text excerpt as RSS description.
+            body_document = lxml_html.fragment_fromstring(
+                body_html,
+                create_parent="div"
+            )
+
+            body_text = clean_text(
+                body_document.text_content()
+            )
+
+            if not result["description"]:
+                result["description"] = body_text[:500]
+
+    except requests.RequestException as exc:
+        logging.warning(
+            "Could not fetch article %s: %s",
+            article_url,
+            exc
+        )
+
+    if not result["date"]:
+        result["date"] = (
+            datetime.now(timezone.utc)
+        )
+
+    return result
 
 
 def extract_articles():
-    logging.info("Fetching Al-Akhbar news listing")
+    logging.info(
+        "Fetching Al-Akhbar news listing"
+    )
 
     html = fetch(NEWS_URL)
-    soup = BeautifulSoup(html, "html.parser")
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
 
     articles = {}
     seen_urls = set()
 
-    # News article URLs use /news/...
+    # Find news article links.
     for link in soup.find_all("a", href=True):
+
         url = absolute_url(link["href"])
+
         parsed = urlparse(url)
 
         if parsed.netloc != urlparse(BASE_URL).netloc:
@@ -133,21 +400,24 @@ def extract_articles():
         if parsed.path.rstrip("/") == "/news":
             continue
 
+        # Remove query strings and fragments.
         url = url.split("#")[0].split("?")[0]
 
         if url in seen_urls:
             continue
 
-        title = clean_text(link.get_text(" ", strip=True))
+        title = clean_text(
+            link.get_text(" ", strip=True)
+        )
 
-        # Avoid empty links and navigation elements.
         if len(title) < 12:
             continue
 
         seen_urls.add(url)
 
-        # Try to find the surrounding article card.
+        # Find surrounding listing card.
         container = link
+
         for _ in range(5):
             if container.parent:
                 container = container.parent
@@ -156,39 +426,71 @@ def extract_articles():
             container.get_text(" ", strip=True)
         )
 
-        # Extract a short introductory description.
+        # Extract listing description.
         description = ""
+
         for paragraph in container.find_all("p"):
+
             candidate = clean_text(
                 paragraph.get_text(" ", strip=True)
             )
-            if len(candidate) > 35 and candidate != title:
+
+            if (
+                len(candidate) > 35
+                and candidate != title
+            ):
                 description = candidate
                 break
 
+        # Extract listing image.
         image_url = ""
+
         image = container.find("img")
+
         if image:
             image_url = (
                 image.get("src")
                 or image.get("data-src")
+                or image.get("data-original")
                 or ""
             )
+
             if image_url:
-                image_url = absolute_url(image_url)
+                image_url = absolute_url(
+                    image_url,
+                    url
+                )
+
+        logging.info(
+            "Processing article: %s",
+            title
+        )
+
+        # Fetch article once.
+        article_data = extract_article(
+            url,
+            card_text,
+            description
+        )
 
         articles[url] = {
             "title": title,
             "url": url,
-            "description": description[:1000],
+            "description": (
+                article_data["description"][:1000]
+            ),
+            "content": article_data["content"],
             "image": image_url,
-            "date": article_date(url, card_text),
+            "date": article_data["date"],
         }
 
         if len(articles) >= MAX_ITEMS:
             break
 
-    logging.info("Found %d candidate articles", len(articles))
+    logging.info(
+        "Found %d candidate articles",
+        len(articles)
+    )
 
     return sorted(
         articles.values(),
@@ -203,38 +505,53 @@ def extract_articles():
 
 def generate_feed(articles):
 
-    rss = ET.Element("rss", {
-        "version": "2.0",
-        "xmlns:atom": "http://www.w3.org/2005/Atom",
-        "xmlns:content": "http://purl.org/rss/1.0/modules/content/",
-        "xmlns:media": "http://search.yahoo.com/mrss/",
-    })
-
-    channel = ET.SubElement(rss, "channel")
-
-    ET.SubElement(channel, "title").text = (
-        "Al-Akhbar English – News"
+    rss = ET.Element(
+        "rss",
+        {"version": "2.0"}
     )
 
-    ET.SubElement(channel, "link").text = NEWS_URL
-
-    ET.SubElement(channel, "description").text = (
-        "Latest news articles from Al-Akhbar English."
-    )
-
-    ET.SubElement(channel, "language").text = "en"
-
-    ET.SubElement(channel, "generator").text = (
-        "Al-Akhbar RSS Generator"
-    )
-
-    ET.SubElement(channel, "lastBuildDate").text = (
-        format_datetime(datetime.now(timezone.utc))
+    channel = ET.SubElement(
+        rss,
+        "channel"
     )
 
     ET.SubElement(
         channel,
-        "{http://www.w3.org/2005/Atom}link",
+        "title"
+    ).text = "Al-Akhbar English – News"
+
+    ET.SubElement(
+        channel,
+        "link"
+    ).text = NEWS_URL
+
+    ET.SubElement(
+        channel,
+        "description"
+    ).text = (
+        "Latest news articles from Al-Akhbar English."
+    )
+
+    ET.SubElement(
+        channel,
+        "language"
+    ).text = "en"
+
+    ET.SubElement(
+        channel,
+        "generator"
+    ).text = "Al-Akhbar RSS Generator"
+
+    ET.SubElement(
+        channel,
+        "lastBuildDate"
+    ).text = format_datetime(
+        datetime.now(timezone.utc)
+    )
+
+    ET.SubElement(
+        channel,
+        f"{{{ATOM_NS}}}link",
         {
             "href": os.environ.get("FEED_URL", ""),
             "rel": "self",
@@ -243,37 +560,90 @@ def generate_feed(articles):
     )
 
     for article in articles:
-        item = ET.SubElement(channel, "item")
 
-        ET.SubElement(item, "title").text = article["title"]
-        ET.SubElement(item, "link").text = article["url"]
-
-        ET.SubElement(item, "guid", {
-            "isPermaLink": "true"
-        }).text = article["url"]
-
-        ET.SubElement(item, "pubDate").text = (
-            format_datetime(article["date"])
+        item = ET.SubElement(
+            channel,
+            "item"
         )
 
-        ET.SubElement(item, "description").text = (
-            article["description"]
+        ET.SubElement(
+            item,
+            "title"
+        ).text = article["title"]
+
+        ET.SubElement(
+            item,
+            "link"
+        ).text = article["url"]
+
+        ET.SubElement(
+            item,
+            "guid",
+            {"isPermaLink": "true"}
+        ).text = article["url"]
+
+        ET.SubElement(
+            item,
+            "pubDate"
+        ).text = format_datetime(
+            article["date"]
         )
 
-        # Preserve the original article URL for Feeder.
-        ET.SubElement(item, "source", {
-            "url": BASE_URL
-        }).text = "Al-Akhbar"
+        ET.SubElement(
+            item,
+            "description"
+        ).text = article["description"]
 
+        # Publisher attribution.
+        ET.SubElement(
+            item,
+            "source",
+            {"url": BASE_URL}
+        ).text = "Al-Akhbar"
+
+        # Publish full HTML only with permission.
+        if (
+            FULL_TEXT_SYNDICATION
+            and article["content"]
+        ):
+
+            content = add_attribution(
+                article["content"],
+                article["url"]
+            )
+
+        else:
+            # Excerpt-only publication with linked attribution.
+            excerpt = article["description"]
+
+            content = (
+                f"<p>{escape_html(excerpt)}</p>"
+                f'<p>Read the full article at '
+                f'<a href="{escape_html(article["url"])}">'
+                f'Al-Akhbar</a>.</p>'
+            )
+
+        ET.SubElement(
+            item,
+            f"{{{CONTENT_NS}}}encoded"
+        ).text = content
+
+        # Thumbnail.
         if article["image"]:
+
             ET.SubElement(
                 item,
-                "{http://search.yahoo.com/mrss/}thumbnail",
+                f"{{{MEDIA_NS}}}thumbnail",
                 {"url": article["image"]}
             )
 
+    # Write RSS XML.
     tree = ET.ElementTree(rss)
-    ET.indent(tree, space="  ")
+
+    ET.indent(
+        tree,
+        space="  "
+    )
 
     tree.write(
         OUTPUT_FILE,
@@ -289,11 +659,25 @@ def generate_feed(articles):
 
 
 # --------------------------------------------------
+# HTML escaping
+# --------------------------------------------------
+
+def escape_html(value):
+    """Escape text for safe HTML insertion."""
+
+    from html import escape
+
+    return escape(value or "", quote=True)
+
+
+# --------------------------------------------------
 # Main
 # --------------------------------------------------
 
 if __name__ == "__main__":
+
     try:
+
         articles = extract_articles()
 
         if not articles:
@@ -304,5 +688,9 @@ if __name__ == "__main__":
         generate_feed(articles)
 
     except Exception:
-        logging.exception("Feed generation failed")
+
+        logging.exception(
+            "Feed generation failed"
+        )
+
         raise
