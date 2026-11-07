@@ -176,88 +176,93 @@ def extract_date_from_soup(soup, card_text):
 # Article body extraction
 # --------------------------------------------------
 
+ARTICLE_BODY_SELECTOR = ".post-details-content > div:nth-child(1)"
+
+
 def extract_article_body(html, article_url):
-    """
-    Extract article content using the stable article container selector.
-    Preserve original article HTML and inline links.
-    """
+    soup = BeautifulSoup(html, "html.parser")
 
-    try:
-        soup = BeautifulSoup(html, "html.parser")
+    selectors = [
+        ".post-details-content > div:nth-child(1)",
+        ".post-details-content",
+        "article",
+    ]
 
-        body = soup.select_one(ARTICLE_BODY_SELECTOR)
+    logging.info("Inspecting article: %s", article_url)
+
+    for selector in selectors:
+        body = soup.select_one(selector)
 
         if not body:
-            logging.error(
-                "Article body selector not found: %s",
-                article_url
-            )
-            return ""
+            logging.info("Selector NOT FOUND: %s", selector)
+            continue
 
-        # Work on a copy so the original soup remains untouched.
+        text = body.get_text(" ", strip=True)
+
+        logging.info(
+            "Selector: %s | Text length: %d | HTML length: %d",
+            selector,
+            len(text),
+            len(str(body))
+        )
+
+        logging.info(
+            "Text preview: %s",
+            text[:500]
+        )
+
+        if len(text) < 200:
+            continue
+
+        # Preserve original HTML.
         body = BeautifulSoup(
             str(body),
             "html.parser"
-        ).find("div")
+        ).find()
 
         if not body:
-            return ""
+            continue
 
-        # Remove scripts and non-content elements.
         for element in body.select(
             "script, style, noscript, iframe"
         ):
             element.decompose()
 
-        # Convert relative links to absolute URLs.
         for link in body.select("a[href]"):
             link["href"] = absolute_url(
                 link["href"],
                 article_url
             )
 
-        # Convert relative image URLs to absolute URLs.
         for image in body.select("img"):
-            for attribute in (
-                "src",
-                "data-src",
-                "data-original"
-            ):
-                if image.get(attribute):
-                    image[attribute] = absolute_url(
-                        image[attribute],
+            for attr in ("src", "data-src", "data-original"):
+                if image.get(attr):
+                    image[attr] = absolute_url(
+                        image[attr],
                         article_url
                     )
 
         content = body.decode_contents()
 
-        text_length = len(
-            body.get_text(" ", strip=True)
-        )
-
         logging.info(
-            "Extracted article: %d characters (%s)",
-            text_length,
+            "SUCCESS: Extracted %d characters from %s",
+            len(text),
             article_url
         )
-
-        if text_length < 200:
-            logging.warning(
-                "Article body unusually short: %s",
-                article_url
-            )
-            return ""
 
         return content
 
-    except Exception:
-        logging.exception(
-            "Article extraction failed: %s",
-            article_url
-        )
-        return ""
+    logging.error(
+        "NO ARTICLE BODY FOUND in downloaded HTML: %s",
+        article_url
+    )
 
+    logging.info(
+        "Downloaded page title: %s",
+        soup.title.get_text(strip=True) if soup.title else "None"
+    )
 
+    return ""
 # --------------------------------------------------
 # Article attribution
 # --------------------------------------------------
@@ -588,7 +593,15 @@ def generate_feed(articles):
             {"url": BASE_URL}
         ).text = "Al-Akhbar"
 
+        
         # Publish full HTML only with permission.
+        logging.info(
+            "SYNDICATION CHECK: enabled=%s, content_length=%d, "
+            "description_length=%d",
+            FULL_TEXT_SYNDICATION,
+            len(article.get("content", "")),
+            len(article.get("description", ""))
+        )
         if (
             FULL_TEXT_SYNDICATION
             and article["content"]
