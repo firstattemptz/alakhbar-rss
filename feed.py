@@ -120,57 +120,96 @@ def normalize_date(value):
 # Article metadata
 # --------------------------------------------------
 
-def extract_date_from_soup(soup, card_text):
-    """Extract publication date from article metadata."""
+def extract_metadata(soup, article_url):
+    """Extract article metadata from JSON-LD and HTML meta tags."""
 
-    candidates = [
-        soup.find(
-            "meta",
-            property="article:published_time"
-        ),
-        soup.find(
-            "meta",
-            attrs={"name": "date"}
-        ),
-        soup.find(
-            "meta",
-            attrs={"name": "publish-date"}
-        ),
-    ]
+    metadata = {}
 
-    for tag in candidates:
-        if tag and tag.get("content"):
-            result = normalize_date(tag["content"])
-
-            if result:
-                return result
-
-    for tag in soup.find_all("time"):
-        value = (
-            tag.get("datetime")
-            or tag.get_text(" ", strip=True)
+    def get_meta(property_name):
+        tag = (
+            soup.find("meta", property=property_name)
+            or soup.find("meta", attrs={"name": property_name})
         )
+        return tag.get("content", "").strip() if tag else ""
 
-        result = normalize_date(value)
+    # JSON-LD
+    for script in soup.find_all(
+        "script",
+        type="application/ld+json"
+    ):
+        try:
+            data = json.loads(
+                script.string or script.get_text()
+            )
 
-        if result:
-            return result
+            if isinstance(data, list):
+                data = next(
+                    (x for x in data if isinstance(x, dict)),
+                    {}
+                )
 
-    # Fallback to listing card date.
-    match = re.search(
-        r"\b\d{1,2}[./-]\d{1,2}[./-]\d{4}\b",
-        card_text
+            if data.get("@type") == "NewsArticle":
+                metadata["title"] = data.get("headline", "")
+
+                author = data.get("author", [])
+
+                if isinstance(author, dict):
+                    author = [author]
+
+                names = [
+                    person.get("name", "")
+                    for person in author
+                    if isinstance(person, dict)
+                ]
+
+                metadata["author"] = ", ".join(
+                    name for name in names if name
+                )
+
+                metadata["date"] = data.get(
+                    "datePublished", ""
+                )
+
+                break
+
+        except (ValueError, TypeError):
+            continue
+
+    # HTML metadata fallbacks
+    metadata["title"] = (
+        metadata.get("title")
+        or get_meta("og:title")
+        or (soup.title.get_text(strip=True) if soup.title else "")
     )
 
-    if match:
-        result = normalize_date(
-            match.group()
+    metadata["author"] = (
+        metadata.get("author")
+        or get_meta("author")
+        or "Al-Akhbar"
+    )
+
+    metadata["description"] = (
+        get_meta("og:description")
+        or get_meta("description")
+    )
+
+    metadata["image"] = (
+        get_meta("og:image")
+    )
+
+    metadata["date"] = (
+        metadata.get("date")
+        or get_meta("article:published_time")
+        or get_meta("date")
+    )
+
+    if metadata["image"]:
+        metadata["image"] = urljoin(
+            article_url,
+            metadata["image"]
         )
 
-        if result:
-            return result
-
-    return None
+    return metadata
 
 
 # --------------------------------------------------
@@ -429,7 +468,8 @@ def extract_article(article_url, card_text, description):
             soup,
             card_text
         )
-
+        metadata = extract_metadata(soup, article_url)
+        
         # Extract article body.
         body_html = extract_article_body(
             html,
@@ -451,6 +491,20 @@ def extract_article(article_url, card_text, description):
 
             if not result["description"]:
                 result["description"] = body_text[:500]
+
+    article = {
+    "title": metadata["title"],
+    "author": metadata["author"],
+    "description": metadata["description"],
+    "image": metadata["image"],
+    "date": (
+        date_parser.parse(metadata["date"])
+        if metadata["date"]
+        else datetime.now(timezone.utc)
+    ),
+    "url": article_url,
+    "content": body_html,
+}
 
     except requests.RequestException as exc:
         logging.warning(
